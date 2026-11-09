@@ -1,0 +1,30 @@
+# 依赖与构建产物
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 运行期状态（每个机器不同，绝不能提交）
+agentview-tabs.json
+*.log
+
+# 内部迭代产物：迭代报告、基准原始数据、一次性脚本、截图证据
+REPORT.md
+BENCHMARK.md
+SIDEBAR_PANEL_TODO.md
+X_AI_话题整理_*.md
+bench*.mjs
+bench*.json
+_*.mjs
+_*.cjs
+_*.js
+_*.json
+_*.txt
+*.png
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

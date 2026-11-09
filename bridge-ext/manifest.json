@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "AgentView CDP Bridge",
+  "version": "1.0.0",
+  "description": "Own CDP transport for AgentView: exposes chrome.debugger to the local agentview CLI so it can drive the real Chrome profile without restarting the browser.",
+  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "AgentView CDP Bridge" },
+  "minimum_chrome_version": "125"
+}
