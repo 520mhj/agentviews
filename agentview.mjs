@@ -25,7 +25,7 @@
  */
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,7 +101,7 @@ function parse(argv) {
   const f = {}, p = [];
   // 只有这些开关带值；其余（--json / --headful / --prune ...）是布尔，
   // 后面那个 token 是命令名，不能被吞掉（踩过 `--attach pages` 被解析成 help）。
-  const VALUE_FLAGS = new Set(['name', 'id', 'text', 'proxy', 'timeout', 'shot', 'port', 'state', 'idle', 'beat', 'attach']);
+  const VALUE_FLAGS = new Set(['name', 'id', 'text', 'proxy', 'timeout', 'shot', 'port', 'state', 'idle', 'beat', 'attach', 'max', 'rounds']);
   // 从 0 全扫：全局开关（--attach）可以出现在命令名之前，不能假定 argv[0] 就是 cmd。
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -159,46 +159,122 @@ const MAP_SRC = String.raw`(()=>{
            capabilities:caps, total_nodes:N.length };
 })()`;
 
-// 通用结构化采集：可见的、有正文的内容型链接 + 指标数字。
-// 不写站点正则（那是 N×M 适配器），跨站靠"可见 + 文本够长 + 带数字"启发式，
-// 站点差异交给 map 去发现。替代被反爬卡死的爬虫：浏览器里读，天然带登录态。
-// v12：后台 tab / SPA 结果流是懒加载的（YouTube 首屏只渲染十几条）。
-// 「整理数据」前先有界滚动让结果追加 —— 这就是自媒体工作者边滚边读的动作。
-// 对照实验里另一条通道也做同样的滚动，保证比较公平。
-const SCROLL_PRIME_SRC = String.raw`(async()=>{try{
-  await new Promise(r=>setTimeout(r,2500));           // 等 SPA 首屏渲染完再滚，否则滚空列表
-  for(let i=0;i<6;i++){window.scrollTo(0,document.body.scrollHeight);
-    await new Promise(r=>setTimeout(r,600));}         // 每次滚到底留时间让结果流追加
-  window.scrollTo(0,0);
-  await new Promise(r=>setTimeout(r,400));
-}catch(e){}return true})()`;
-const COLLECT_SRC = String.raw`(()=>{
-  const out=[], seen=new Set();
+// 结构化采集：把"阅读资讯"变成可写进表格的数据。
+// 不写站点正则（那是 N×M 适配器），跨站靠"可见 + 文本够长 + 带数字"启发式。
+// 关键：虚拟列表（X / 抖音 / B站）滚过一屏就卸载旧节点，所以必须
+// **边滚边抓、每轮去重累积**，而不是滚完再抓（那样只剩最后一屏）。
+// 指标语义靠「数字附近的标签词」判断（播放/点赞/评论/转发/时长/日期），
+// 不靠"第几个数字"——那等于给每个站点写适配器。
+const COLLECT_SRC = String.raw`(async()=>{
+  const MAX = (window.__avCollectMax|0) || 200;
+  const ROUNDS = (window.__avCollectRounds|0) || 12;
+  const out=[], seen=new Set(), byHref=new Map();
   const vis=e=>{const r=e.getBoundingClientRect();if(r.width<2||r.height<2)return false;
     const s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none'&&+s.opacity>0.05;};
   const txt=e=>(e.innerText||e.textContent||'').trim().replace(/\s+/g,' ');
-  const MET=/(\d+(?:\.\d+)?\s*(?:万|亿|k|K|M|B)?)/g;
-  for(const a of document.querySelectorAll('a[href]')){
-    if(!vis(a))continue;
-    const t=txt(a); if(t.length<10||t.length>260)continue;
-    const href=a.href; const key=href+'|'+t.slice(0,30); if(seen.has(key))continue; seen.add(key);
-    out.push({title:t.slice(0,140), href, metrics:(t.match(MET)||[]).slice(0,4), text_len:t.length});
-    if(out.length>=80)break;
-  }
-  // 通用内容块兜底（不写站点正则）：社交/资讯站的正文常不在 <a> 里而在
-  // article / role=article / data-testid*=tweet 的文本节点。链接条目偏少时补抽，
-  // 让"搜索→阅读→整理"拿到的是资讯正文而不是账号名。
-  if(out.length<12){
-    for(const c of document.querySelectorAll('article,[role=article],[data-testid*="tweet" i],[data-testid*="cellInnerDiv" i]')){
-      if(!vis(c))continue;
-      const t=txt(c); if(t.length<30||t.length>300)continue;
-      const key='blk|'+t.slice(0,30); if(seen.has(key))continue; seen.add(key);
-      out.push({title:t.slice(0,180), href:location.href, metrics:(t.match(MET)||[]).slice(0,4),
-                text_len:t.length, kind:'content_block'});
-      if(out.length>=80)break;
+  const DATES=/(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?|\d{1,2}月\d{1,2}日|\d+\s*(?:秒|分钟|小时|天|周|个月|年)前|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})/gi;
+  const DUR=/\b\d{1,2}:\d{2}(?::\d{2})?\b/g;
+  // 标签只在数字**紧邻**处找（前 0–8 字符 / 后 0–8 字符），取距离最近的那个。
+  // 用大窗口扫全文会把"卡片里任意位置的赞字"贴给每个数字，等于全标成点赞。
+  const LABELS=[
+    [/(播放|观看|views?|watched)/i,'播放'],
+    [/(点赞|赞同|likes?|(?<![a-z])like(?![a-z]))/i,'点赞'],
+    [/(评论|回复|留言|comments?|repl(?:y|ies))/i,'评论'],
+    [/(转发|分享|reposts?|retweets?|shares?)/i,'转发'],
+    [/(收藏|favorite|bookmark|saves?)/i,'收藏'],
+    [/(弹幕|danmaku|danmu)/i,'弹幕'],
+    [/(粉丝|关注者|followers?|fans)/i,'粉丝'],
+    [/(stars?|星标)/i,'Star'],
+    [/(播放量|观看量)/i,'播放']
+  ];
+  const typeMetrics=(raw)=>{
+    if(!raw) return [];
+    const res=[];
+    // 先整体抠掉时长和日期，避免 "17:41" 被数字正则切成 17 / 41
+    const durs=[...raw.matchAll(DUR)].map(m=>m[0]);
+    const dates=[...raw.matchAll(DATES)].map(m=>m[0]);
+    let rest=raw.replace(DUR,' ').replace(DATES,' ');
+    const NUM=/\d+(?:[.,]\d+)?\s*(?:万|亿|w|W|k|K|M|B|千)?/g;
+    for(const m of rest.matchAll(NUM)){
+      const v=(m[0]||'').trim(); if(!/\d/.test(v)) continue;
+      const at=m.index||0;
+      const before=rest.slice(Math.max(0,at-8), at);
+      const after=rest.slice(at+v.length, at+v.length+8);
+      let label='unnamed', best=99;
+      for(const pair of LABELS){
+        const bm=before.match(pair[0]); if(bm){ const d=8-bm.index; if(d<best){best=d;label=pair[1];} }
+        const am=after.match(pair[0]);  if(am){ const d=am.index; if(d<best){best=d;label=pair[1];} }
+      }
+      res.push({value:v, label, slot:res.length+1});
+      if(res.length>=8) break;
     }
+    for(const d of durs.slice(0,2)) if(!res.some(x=>x.value===d)) res.push({value:d,label:'时长'});
+    for(const d of dates.slice(0,1)) if(!res.some(x=>x.value===d)) res.push({value:d,label:'日期'});
+    return res;
+  };
+  const grabLinks=()=>{
+    for(const a of document.querySelectorAll('a[href]')){
+      if(out.length>=MAX) return;
+      if(!vis(a))continue;
+      const t=txt(a); if(t.length<8||t.length>400)continue;
+      const href=a.href;
+      // 同一个 href 在页面上常有多条 <a>：标题链一条、播放量/时长统计链一条。
+      // 按 href 合并成一条，否则一屏卡片会被算成两倍条目（实测 103 条里 30 条是重复）。
+      const prev=byHref.get(href);
+      // 容器文本（含同级的播放量/日期）比 <a> 自己的文本信息更全
+      const box=a.closest('article,li,section,[role=article],[data-testid*="cell" i],div');
+      // 容器文本减去标题本身：标题里的数字（"13年的等待"）不是指标。
+      // 但 B站这类"统计链接"整条 <a> 就是 "1187.5万 19.2万 02:21"，减掉就什么都不剩了，
+      // 所以只在 <a> 文本确实是标题（含成段文字）时才做减法。
+      const titleish=/[A-Za-z\u4e00-\u9fa5]{4,}/.test(t);
+      const full=box?(titleish?txt(box).split(t).join(' '):txt(box)):t;
+      const mt=typeMetrics(full);
+      if(prev){
+        // 合并：标题取更长的那条（标题链通常比统计链更像标题），指标取并集
+        if(t.length>prev.title.length) prev.title=t.slice(0,300);
+        prev.text_len=Math.max(prev.text_len,t.length);
+        const have=new Set(prev.metrics_typed.map(x=>x.value+'|'+x.label));
+        for(const x of mt) if(!have.has(x.value+'|'+x.label)){ prev.metrics_typed.push(x); prev.metrics.push(x.value); }
+        continue;
+      }
+      const item={title:t.slice(0,300), href, metrics:mt.map(x=>x.value),
+                  metrics_typed:mt, text_len:t.length, kind:'link'};
+      byHref.set(href,item); out.push(item);
+    }
+  };
+  const grabBlocks=()=>{
+    for(const c of document.querySelectorAll('article,[role=article],[data-testid*="tweet" i],[data-testid*="cellInnerDiv" i]')){
+      if(out.length>=MAX) return;
+      if(!vis(c))continue;
+      const t=txt(c); if(t.length<30||t.length>1200)continue;
+      const key='blk|'+t.slice(0,40); if(seen.has(key))continue; seen.add(key);
+      // 内容块不是链接：href 只填它自己内含的 a[href]，没有就是 null。
+      // 绝不能拿 location.href 冒充"原帖链接"。
+      const inner=c.querySelector('a[href]');
+      const mt=typeMetrics(t);
+      out.push({title:t.slice(0,400), href:inner?inner.href:null,
+                metrics:mt.map(x=>x.value), metrics_typed:mt,
+                text_len:t.length, kind:'content_block'});
+    }
+  };
+  const round=()=>{ const n=out.length; grabLinks(); grabBlocks(); return out.length-n; };
+  try{ await new Promise(r=>setTimeout(r,1200)); }catch(e){}
+  round();
+  let rounds=0, dry=0;
+  for(let i=0;i<ROUNDS;i++){
+    if(out.length>=MAX) break;
+    rounds=i+1;
+    window.scrollBy(0, Math.max(300, Math.round(window.innerHeight*0.9)));
+    await new Promise(r=>setTimeout(r,900));
+    const got=round();
+    const atBottom=(window.innerHeight+window.scrollY)>=document.body.scrollHeight-4;
+    // 到底不等于没有新内容：结果流常在到底后才追加，多给几轮。
+    if(got===0){ dry++; if(dry>=3) break; } else dry=0;
+    if(atBottom && got>0){ try{ await new Promise(r=>setTimeout(r,500)); }catch(e){} }
   }
   return { site:location.href, title:document.title, items:out, count:out.length,
+           rounds, scroll_y:Math.round(window.scrollY),
+           metric_note:'label 来自数字紧邻的标签词；label=unnamed 表示页面上只有图标没有文字，slot 是它在同类指标里的序号',
            innertext_len:(document.body?txt(document.body):'').length };
 })()`;
 
@@ -456,7 +532,11 @@ function tabs() {
   return TABS;
 }
 function saveTabs() {
-  try { writeFileSync(stateFile(), JSON.stringify(TABS, null, 2)); } catch (e) { dbg('saveTabs', e.message); }
+  try {
+    const f = stateFile();
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, JSON.stringify(TABS, null, 2));
+  } catch (e) { dbg('saveTabs', e.message); }
 }
 
 function isAttach() { return ATTACH_PORT !== null || EXT_MODE; }
@@ -1168,13 +1248,16 @@ async function main(cdpIn) {
 
   // 结构化采集：把"阅读资讯"变成可写进表格的数据。
   if (cmd === 'collect') {
-    // 先有界滚动读流（后台 tab / SPA 结果流懒加载），再抽取。
-    // 不额外占用模型观测：这一步是采集动作本身，结果仍是一份结构化数据。
-    await evalJs(cdp, SCROLL_PRIME_SRC, true).catch(() => {});
-    const r = await evalJs(cdp, COLLECT_SRC, false);
+    // 边滚边抓：虚拟列表滚过一屏就卸载旧节点，滚完再抓只剩最后一屏。
+    // 上限与轮数可由调用方收紧（--max / --rounds），默认 200 条 / 12 轮。
+    if (flags.max) await evalJs(cdp, 'window.__avCollectMax=' + (Number(flags.max) || 0), false).catch(() => {});
+    if (flags.rounds) await evalJs(cdp, 'window.__avCollectRounds=' + (Number(flags.rounds) || 0), false).catch(() => {});
+    const r = await evalJs(cdp, COLLECT_SRC, true);
     if (flags.json) return emit(JSON.stringify(r, null, 2));
-    emit('# 结构化采集  ' + r.site + '  ·  ' + r.count + ' 条  ·  正文 ' + r.innertext_len + ' 字');
+    emit('# 结构化采集  ' + r.site + '  ·  ' + r.count + ' 条  ·  ' + r.rounds + ' 轮  ·  正文 ' + r.innertext_len + ' 字');
+    emit('# href=null 表示这是内容块（正文），不是一条可跳转的条目');
     for (const it of r.items.slice(0, 30)) emit(JSON.stringify(it));
+    if (r.count > 30) emit('# …+' + (r.count - 30) + ' 条，用 --json 取全量');
     return;
   }
 

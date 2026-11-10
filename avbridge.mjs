@@ -44,8 +44,19 @@ export class AvBridge {
     let body = '';
     try { for await (const c of req) body += c; } catch { /* ignore */ }
     if (req.url === '/ping') {
+      // 兼容两种读法：老的 {ok,paired,info} 和扁平的 {extension,version,attached}。
+      // 扩展第一次轮询后 info 才有内容；没配对时字段为 null，不要据此判定"未安装"。
+      const info = this.info || {};
       res.writeHead(200, h);
-      return res.end(JSON.stringify({ ok: true, paired: this.pullers.length > 0, info: this.info }));
+      return res.end(JSON.stringify({
+        ok: true,
+        paired: this.pullers.length > 0,
+        info: this.info,
+        extension: info.extension || null,
+        version: info.version || null,
+        attached: info.attached || [],
+        bridge_port: this.port,
+      }));
     }
     if (req.url === '/pull') {
       if (this.queue.length) {
@@ -85,8 +96,11 @@ export class AvBridge {
         timer,
         call: (out) => {
           clearTimeout(timer);
-          if (out.ok) resolve(out.result);
-          else reject(new Error(out.error || ('job failed: ' + op)));
+          if (out.ok) {
+            // 记住扩展自报的身份，供 /ping（popup、probe）读取。
+            if (op === 'ping' && out.result) this.info = out.result;
+            resolve(out.result);
+          } else reject(new Error(out.error || ('job failed: ' + op)));
         }
       });
       this._deliver({ id, op, args });
