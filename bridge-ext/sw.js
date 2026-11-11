@@ -1,4 +1,4 @@
-// AgentView CDP Bridge — MV3 service worker (v10)
+// AgentViews CDP Bridge — MV3 service worker (v10)
 // chrome.debugger API 是 CDP 的 alternate transport。扩展挂在用户日常桌面 Chrome，
 // 被驱动的 tab 就在主浏览器窗口里 → cookies / 登录态 / 窗口天然复用，
 // 不需要 --remote-debugging-port、不需要重启浏览器、不需要搬运 cookie。
@@ -98,7 +98,7 @@ async function run(op, a) {
   if (op === 'tabs.update') return tabJson(await chrome.tabs.update(Number(a.tabId), { url: a.url }));
 
   // ── CDP 传输：chrome.debugger.sendCommand 直接返回 CDP result ──
-  // 允许域覆盖 agentview 用到的全部命令：Runtime / Page / Input / Emulation /
+  // 允许域覆盖 agentviews 用到的全部命令：Runtime / Page / Input / Emulation /
   // DOM / Network / Target / Storage ...（官方 Restricted domains 列表）
   if (op === 'debugger.send') {
     const tabId = Number(a.tabId), key = String(tabId);

@@ -5,7 +5,7 @@ yarn-error.log*
 pnpm-debug.log*
 
 # 运行期状态（每个机器不同，绝不能提交）
-agentview-tabs.json
+agentviews-tabs.json
 *.log
 
 # 内部迭代产物：迭代报告、基准原始数据、一次性脚本、截图证据
@@ -20,6 +20,7 @@ _*.cjs
 _*.js
 _*.json
 _*.txt
+_*.sh
 *.png
 
 # 编辑器 / 系统

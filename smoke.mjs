@@ -4,7 +4,7 @@
  * 每一步都断言，失败就非 0 退出。用来回答"现在到底能不能直接用"。
  *
  * 用法：node smoke.mjs [--headful]
- * 前置：先 `node agentview.mjs serve`（常驻模式），否则每次连接都会换一个浏览器。
+ * 前置：先 `node agentviews.mjs serve`（常驻模式），否则每次连接都会换一个浏览器。
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CLI = join(HERE, 'agentview.mjs');
+const CLI = join(HERE, 'agentviews.mjs');
 const headful = process.argv.includes('--headful');
 
 let step = 0;

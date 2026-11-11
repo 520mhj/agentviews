@@ -11,7 +11,7 @@
 
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.0-8b5cf6.svg)]()
+[![Version](https://img.shields.io/badge/version-1.0.0-8b5cf6.svg)]()
 [![Chrome](https://img.shields.io/badge/Chrome-MV3%20%2B%20chrome.debugger-4285F4?logo=googlechrome&logoColor=white)]()
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
 [![Recall](https://img.shields.io/badge/recall-1.000%20%2F%205%20sites-success.svg)]()
@@ -77,7 +77,7 @@
 到陌生站点，第一件事不是点，是 `map`。它按用途分组告诉你这页有什么：检索入口、导航频道、可打开的条目、账户功能、页内动作、可读内容。看完再决定路径，比盲点省很多次失败。
 
 ```bash
-node agentview.mjs --ext map
+node agentviews.mjs --ext map
 ```
 
 ### 2. `act` 返回 `ok` 的含义，需要你自己判断
@@ -108,8 +108,8 @@ node agentview.mjs --ext map
 判断是否真的达成目标，优先用可验证的事实，而不是"看起来变了"：
 
 ```bash
-node agentview.mjs --ext verify        # {selected, checked, nodes, url}
-node agentview.mjs --ext eval "JSON.stringify(document.querySelectorAll('.item').length)"
+node agentviews.mjs --ext verify        # {selected, checked, nodes, url}
+node agentviews.mjs --ext eval "JSON.stringify(document.querySelectorAll('.item').length)"
 ```
 
 ### 3. 标签页：关不关，取决于这次任务的性质
@@ -122,9 +122,9 @@ node agentview.mjs --ext eval "JSON.stringify(document.querySelectorAll('.item')
 | **辅助性**：帮用户查/看/操作，页面他还要接着用 | `keep` | 什么都不关，把当前标签页与状态反馈回去 |
 
 ```bash
-node agentview.mjs --ext pages        # 先看清：哪些是我开的（mine），哪些是用户的（user）
-node agentview.mjs --ext done         # {closed_owned_tabs:1, user_tabs_untouched:true}
-node agentview.mjs --ext keep         # {mode:"keep", kept:true, ...}
+node agentviews.mjs --ext pages        # 先看清：哪些是我开的（mine），哪些是用户的（user）
+node agentviews.mjs --ext done         # {closed_owned_tabs:1, user_tabs_untouched:true}
+node agentviews.mjs --ext keep         # {mode:"keep", kept:true, ...}
 ```
 
 **默认建议**：任务完成后先 `pages` 看一眼，再决定。拿不准时选 `keep`——多留一个标签页的代价，远小于关掉用户正在读的东西。
@@ -136,10 +136,10 @@ node agentview.mjs --ext keep         # {mode:"keep", kept:true, ...}
 `--ext` 驱动的是用户自己的浏览器，cookies 天然同源。真正需要人工的只有两种情况：**从没登过**，或者**要过验证码/扫码**。
 
 ```bash
-node agentview.mjs --ext login-check
+node agentviews.mjs --ext login-check
 # {"need_login":false,"logged_in":true,"password_inputs":0,"login_named":3,
 #  "hints":["登录","立即登录"],"advice":"未检测到登录要求，可继续任务"}
-node agentview.mjs --ext login-watch --timeout 300
+node agentviews.mjs --ext login-watch --timeout 300
 ```
 
 `login-watch` 是事件驱动的：页内监听真人动作（点击、输入、导航），用户登完就返回 `login_done`；超时如实返回 `timeout_still_login`，不会假装成功。把 `hints` 转述给用户，让他去浏览器里操作，比反复重试有效。
@@ -149,7 +149,7 @@ node agentview.mjs --ext login-watch --timeout 300
 `collect` 处理的是虚拟列表——**滚过一屏，旧节点就被卸载**。所以它逐轮滚动、每轮抓一次、去重累积，而不是滚完再抓（那样只剩最后一屏）。
 
 ```bash
-node agentview.mjs --ext collect --json --max 120 --rounds 10
+node agentviews.mjs --ext collect --json --max 120 --rounds 10
 ```
 
 返回结构：
@@ -228,7 +228,7 @@ Chrome 136+ **禁止在默认 user data dir 上开 `--remote-debugging-port`**�
 桌面主 Chrome（默认 profile，无调试端口，用户正常在用）
   └─ chrome.debugger.attach({tabId}) → sendCommand(method, params)
         ↑ 扩展 SW 长轮询本机 loopback 桥
-  agentview.mjs  ExtTransport.send()   ← 与 class CDP.send() 完全同构
+  agentviews.mjs  ExtTransport.send()   ← 与 class CDP.send() 完全同构
 ```
 
 **结果**：被驱动的 tab 就在用户自己的浏览器窗口里，cookies / 登录态 / 代理 / 扩展全部同源。不重启、不搬 cookie、不每会话点开关。
@@ -246,7 +246,7 @@ git clone https://github.com/520mhj/agentviews.git
 cd agentviews
 npm link          # 之后可直接用 agentviews 命令
 # 或者不装，直接跑
-node agentview.mjs <命令>
+node agentviews.mjs <命令>
 ```
 
 ### 加载扩展（一次，之后永久生效）
@@ -263,7 +263,7 @@ node agentview.mjs <命令>
 ### 验证安装
 
 ```bash
-node agentview.mjs --ext probe
+node agentviews.mjs --ext probe
 ```
 
 期望看到：
@@ -290,7 +290,7 @@ node smoke.mjs
 Agent 面对陌生页面最大的浪费不是点错，是**不知道有什么可点**。`map` 把一级页面的能力按用途分组，每类给一句人话说明：
 
 ```bash
-$ node agentview.mjs --ext map
+$ node agentviews.mjs --ext map
 
 # agentviews 地图  https://www.bilibili.com/
 # 哔哩哔哩 (゜-゜)つロ 干杯~-bilibili  ·  101 个能力节点
@@ -330,7 +330,7 @@ $ node agentview.mjs --ext map
 ### 🔍 检索（`search`）— 复用同一个 tab，不反复开关
 
 ```bash
-$ node agentview.mjs --ext search "鬼畜 热门"
+$ node agentviews.mjs --ext search "鬼畜 热门"
 # agentviews search  鬼畜 热门  →  https://search.bilibili.com/all?keyword=%E9%AC%BC%E7%95%9C%20%E7%83%AD%E9%97%A8
 # 168 nodes · 4966 chars · 298.9× (HTML 1449.3 KB)
 ```
@@ -340,7 +340,7 @@ $ node agentview.mjs --ext search "鬼畜 热门"
 ### 📊 采集（`collect`）— 直接出数据，不出 DOM
 
 ```bash
-$ node agentview.mjs --ext collect --json --max 120 --rounds 10
+$ node agentviews.mjs --ext collect --json --max 120 --rounds 10
 ```
 
 ```json
@@ -370,15 +370,15 @@ $ node agentview.mjs --ext collect --json --max 120 --rounds 10
 ### ⚡ 操作（`act` / `verify`）— 按名字，不按 id
 
 ```bash
-$ node agentview.mjs --ext act --name "豆瓣高分"
+$ node agentviews.mjs --ext act --name "豆瓣高分"
 act → {"ok":true,"resolved":"self","point":[338,244]}
 settle → {"settled_ms":291,"reason":"quiet"}
 
-$ node agentview.mjs --ext act --name "欧美"
+$ node agentviews.mjs --ext act --name "欧美"
 act → {"ok":true,"resolved":"self","point":[238,286]}
 settle → {"settled_ms":289,"reason":"quiet"}
 
-$ node agentview.mjs --ext verify
+$ node agentviews.mjs --ext verify
 {"url":"https://movie.douban.com/explore","selected":["豆瓣高分","欧美"],"checked":0,"nodes":72}
 ```
 
@@ -397,9 +397,9 @@ $ node agentview.mjs --ext verify
 撞到登录墙时是事件驱动的，不是干轮询：
 
 ```bash
-node agentview.mjs --ext login-check
+node agentviews.mjs --ext login-check
 # {"need_login":true,"logged_in":false,"password_inputs":1,"hints":["扫码登录","验证码登录"]}
-node agentview.mjs --ext login-watch --timeout 300 --idle 12 --beat 5 [--freeze]
+node agentviews.mjs --ext login-watch --timeout 300 --idle 12 --beat 5 [--freeze]
 ```
 
 页内 `window.__avWatch` 监听真人动作（`pointerdown/keydown/input/click/...`），MutationObserver + 400ms URL 轮询记页面变化；**只有事件发生才跑一次判定**，空闲时 CDP 往返趋近于零。空闲超 `--idle` 秒进 `dormant`，按 `--beat` 发心跳；`--freeze` 可选 `Page.setWebLifecycleState('frozen')` 省内存。
@@ -417,8 +417,8 @@ node agentview.mjs --ext login-watch --timeout 300 --idle 12 --beat 5 [--freeze]
 - **attach 模式下绝不调用 `Browser.close`。**
 
 ```bash
-$ node agentview.mjs --ext pages
-$ node agentview.mjs --ext done
+$ node agentviews.mjs --ext pages
+$ node agentviews.mjs --ext done
 {"closed_owned_tabs":1,"user_tabs_untouched":true}
 ```
 
@@ -525,8 +525,8 @@ $ node agentview.mjs --ext done
 ### 场景一：读一篇文章并总结
 
 ```bash
-node agentview.mjs --ext open https://zhuanlan.zhihu.com/p/2028236189895770858
-node agentview.mjs --ext collect --json     # 12,278 字正文，直接可读
+node agentviews.mjs --ext open https://zhuanlan.zhihu.com/p/2028236189895770858
+node agentviews.mjs --ext collect --json     # 12,278 字正文，直接可读
 ```
 
 > 知乎直连 `web_fetch` 返回 403（反爬）。同一个 URL 用 agentviews 打开就是正常页面——因为请求发自一个真人正在用的浏览器。
@@ -534,13 +534,13 @@ node agentview.mjs --ext collect --json     # 12,278 字正文，直接可读
 ### 场景二：刷视频（含登录墙、含引导层）
 
 ```bash
-node agentview.mjs --ext open https://www.bilibili.com/
-node agentview.mjs --ext act --name "当我的世界下起了滴水石锥雨"
+node agentviews.mjs --ext open https://www.bilibili.com/
+node agentviews.mjs --ext act --name "当我的世界下起了滴水石锥雨"
 # → 新标签页 BV1MF4569E7g，t=4.13s，paused=false，muted=true
 
-node agentview.mjs --ext open https://www.douyin.com/
-node agentview.mjs --ext act --name "我知道了"        # 点掉新手引导层
-node agentview.mjs --ext act --name "美国农民网购中国迷你收割机"
+node agentviews.mjs --ext open https://www.douyin.com/
+node agentviews.mjs --ext act --name "我知道了"        # 点掉新手引导层
+node agentviews.mjs --ext act --name "美国农民网购中国迷你收割机"
 # → ?modal_id=7705460521306311987，t=3.86s，muted=true
 ```
 
@@ -614,7 +614,7 @@ const nodes = await cdp.send('Runtime.evaluate', {
 
 | 文件 | 说明 |
 | --- | --- |
-| `agentview.mjs` | CLI + 自写 CDP 客户端 + 常驻 daemon + probe/--auto/--ext + attach/所有权/分级销毁 + 事件驱动登录 + 地图/search/collect（约 1,590 行） |
+| `agentviews.mjs` | CLI + 自写 CDP 客户端 + 常驻 daemon + probe/--auto/--ext + attach/所有权/分级销毁 + 事件驱动登录 + 地图/search/collect（约 1,590 行） |
 | `extract.js` | 视图提取器（注入页面，约 710 行，零依赖，`VERSION 8.0`） |
 | `avbridge.mjs` | 零依赖 loopback 桥（`/pull` 长轮询 / `/push` 回结果 / job 超时） |
 | `bridge-ext/` | MV3 扩展：`manifest.json` / `sw.js`（`chrome.debugger` 作 CDP 传输）/ `popup.html` / `popup.js` |
@@ -654,3 +654,20 @@ const nodes = await cdp.send('Runtime.evaluate', {
 MIT © [AvaTaring](https://github.com/520mhj)
 
 </div>
+
+## 🆕 v1.0.0：让 Agent 下意识用起来
+
+命令行可简写为 `avs`（`npm link` 之后 `avs` == `agentviews`）。这一版解决的是
+「Agent 不知道该用浏览器」而不是「浏览器能不能操作」。
+
+| 改进 | 怎么用 |
+|---|---|
+| Skill 形式 | 仓库附 `skills/agentviews/SKILL.md`，触发词覆盖「抓不到内容 / 需要登录 / 多标签页 / 整理数据」；复制到 DSH skills 目录即自动生效 |
+| MCP 自动降级 | `initialize` 回带 `instructions`：`web_search` / `web_fetch` 受阻就改用 `av_*`，不用人提醒 |
+| 多标签页并行 | `tab new / use / list / close` + 任意命令加 `--tab <id|#序号>`，多个页面各自独立 |
+| 点击后地图 | `act --map`（或 `av_act` 的 `map=true`）附带返回新页能力地图 `after_map`；嵌套点击后要不要重看，由 Agent 结合任务判断 |
+| 没开浏览器 | `av_boot` 或 MCP 默认 `auto`：用桌面主 Chrome 的 **Default** profile 拉起，登录态/代理/扩展与日常窗口一致 |
+| 多谷歌用户 | `AV_PROFILE_NAME=<目录名>` / `boot --profile <名>` 指定；默认 `Default`（实测可读取 `profile.info_cache` 里的账户信息） |
+
+收尾规则不变：任务性用 `done`（只关自己开的标签页）、辅助性用 `keep`（保留），
+拿不准选 `keep`。详见「给 Agent 的使用须知」。

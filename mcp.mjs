@@ -8,21 +8,22 @@
  *   { "mcpServers": { "agentviews": { "command": "node",
  *       "args": ["<绝对路径>/agentviews/mcp.mjs"] } } }
  *
- * 它把每个 tool call 转发给 `agentview.mjs`（有 daemon 走 daemon，
+ * 它把每个 tool call 转发给 `agentviews.mjs`（有 daemon 走 daemon，
  * 没有就走单命令模式），所以不需要重复实现一套 CDP 逻辑。
  *
  * 传输方式跟 CLI 一致：环境变量 AGENTVIEWS_TRANSPORT=ext|auto|attach|standalone
- * 决定用扩展桥还是裸 CDP。默认 ext（复用桌面主浏览器的登录态）。
+ * 决定用扩展桥还是裸 CDP。默认 auto（没开浏览器也能自己拉起桌面主 Chrome，
+ * 复用登录态；已装扩展且浏览器开着时可设 ext 省一次探测）。
  */
 import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CLI = join(HERE, 'agentview.mjs');
+const CLI = join(HERE, 'agentviews.mjs');
 
 // 传输层前缀：所有命令共用，避免每个 tool 都要传一遍
-const TRANSPORT = (process.env.AGENTVIEWS_TRANSPORT || 'ext').toLowerCase();
+const TRANSPORT = (process.env.AGENTVIEWS_TRANSPORT || 'auto').toLowerCase();
 function tflags() {
   if (TRANSPORT === 'ext') return ['--ext'];
   if (TRANSPORT === 'auto') return ['--auto'];
@@ -30,6 +31,21 @@ function tflags() {
   if (TRANSPORT.startsWith('attach:')) return ['--attach', TRANSPORT.slice(7)];
   return ['--ext'];
 }
+
+// v13：initialize 里回给客户端的 instructions —— 让 Agent "下意识"想到用 av_*，
+// 而不是抓不到内容时反复重试 web_fetch。行为导向，不写实现细节。
+const INSTRUCTIONS = [
+  'agentviews（简称 avs）是浏览器操作层。当 web_search / web_fetch 拿不到内容、',
+  '站点要求登录、需要点击/翻页/滚动/读动态渲染的页面、或要整理多个页面的数据时，',
+  '改用这里的 av_* 工具，不要反复重试抓取。',
+  '起点：av_open(url) → av_map 看当前页能力 → av_act 按名字点/填 → av_verify 做断言。',
+  '多标签：av_tab_new / av_tab_use / av_tab_list，多个页面各自独立；',
+  '点击后想看新页能力，用 av_act 的 map 参数或再跑 av_map（嵌套点击后结构会变，是否重看由你结合任务判断）。',
+  '没开浏览器时 av_boot 会用桌面主 Chrome 的 Default profile 拉起（复用登录态）；',
+  '碰登录墙用 av_login_check + av_login_watch 转述给用户、等他登完再继续。',
+  '收尾：任务性（用完即弃）用 av_done 只关自己开的标签页；辅助性（用户还要接着看）用 av_keep 保留。',
+  '拿不准就选 av_keep —— 多留一个标签页的代价远小于关掉用户正在读的东西。'
+].join('');
 
 const TOOLS = [
   {
@@ -78,13 +94,15 @@ const TOOLS = [
       '操作一个节点：按 name（推荐，页面重建后仍有效）或 id 点击；给 text 则填值。' +
       '返回 ok / resolved / point / settle。' +
       '注意 ok=true 只表示"算出了目标并派发了事件"，是否达成业务目标要自己再读页面确认（av_verify 或 av_view）。' +
-      '名字有歧义会返回 AMBIGUOUS_NAME 与候选，换更精确的名字，不要重试同一个。',
+      '名字有歧义会返回 AMBIGUOUS_NAME 与候选，换更精确的名字，不要重试同一个。' +
+      '给 map=true 会附带返回点击/跳转后的新页能力地图（嵌套多次点击时由你判断要不要重看）。',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string', description: '节点名字（可子串，完全匹配优先）' },
         id: { type: 'string', description: '节点 id（如 n28）；页面重建后失效' },
         text: { type: 'string', description: '填值内容；省略则为点击' },
+        map: { type: 'boolean', description: '点击后附带返回新页能力地图（after_map），默认 false' },
       },
     },
   },
@@ -178,6 +196,32 @@ const TOOLS = [
     },
   },
   {
+    name: 'av_boot',
+    description: '没开浏览器时用它：拉起桌面主 Chrome（默认 Default profile，登录态/代理/扩展与日常窗口一致）。' +
+      '拉起后等扩展桥上线即可直连。多谷歌用户可用 profile 指定目录名（如 "Profile 5"）。',
+    inputSchema: { type: 'object', properties: { profile: { type: 'string', description: 'profile 目录名，默认 Default' } } },
+  },
+  {
+    name: 'av_tab_new',
+    description: '新建一个属于本次任务的标签页并切过去，让多个任务页面彼此独立、互不干扰。' +
+      '给了 url 会直接打开该页。返回 index / id，之后用 av_tab_use 切。',
+    inputSchema: { type: 'object', properties: { url: { type: 'string', description: '可选，直接打开的网址' } } },
+  },
+  {
+    name: 'av_tab_use',
+    description: '切到指定标签页（#序号或 id）。只许切到 agentviews 自己开的；用户的标签页受保护。',
+    inputSchema: { type: 'object', properties: { tab: { type: 'string', description: '#序号（如 "1"）或 target id 前缀' } }, required: ['tab'] },
+  },
+  {
+    name: 'av_tab_list',
+    description: '列出所有标签页，标出 index / curr / mine / user。切换或收尾前用它确认。',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'av_tab_close',
+    description: '关掉指定的、本次任务自己开的标签页并复核结果。拒绝关用户的标签页（baseline 永久保护）。',
+    inputSchema: { type: 'object', properties: { tab: { type: 'string', description: '#序号或 id；省略则关当前' } } },
+  },  {
     name: 'av_shot',
     description: '截当前页面的图，返回保存路径。语义视图读不出"长什么样"时（Canvas、图表、布局错乱）用它补一眼。',
     inputSchema: {
@@ -214,6 +258,7 @@ async function callTool(name, a = {}) {
       else if (a.id) args.push('--id', a.id);
       else return { ok: false, text: '需要 name 或 id' };
       if (a.text !== undefined) args.push('--text', String(a.text));
+      if (a.map) args.push('--map');
       return callCli(args);
     }
     case 'av_verify':
@@ -247,6 +292,17 @@ async function callTool(name, a = {}) {
       return callCli([...T, 'eval', a.expression]);
     case 'av_shot':
       return callCli([...T, 'shot', ...(a.path ? [a.path] : [])]);
+    case 'av_boot':
+      return callCli([...T, 'boot', ...(a.profile ? ['--profile', a.profile] : [])]);
+    case 'av_tab_new':
+      return callCli([...T, 'tab', 'new', ...(a.url ? [a.url] : [])]);
+    case 'av_tab_use':
+      if (!a.tab) return { ok: false, text: '缺少 tab' };
+      return callCli([...T, 'tab', 'use', a.tab]);
+    case 'av_tab_list':
+      return callCli([...T, 'tab', 'list']);
+    case 'av_tab_close':
+      return callCli([...T, 'tab', 'close', ...(a.tab ? [a.tab] : [])]);
     default:
       return { ok: false, text: `未知工具: ${name}` };
   }
@@ -271,7 +327,8 @@ process.stdin.on('data', async chunk => {
         send({ jsonrpc: '2.0', id, result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'agentviews', version: '0.9.0' },
+          serverInfo: { name: 'agentviews', version: '1.0.0' },
+          instructions: INSTRUCTIONS,
         } });
       } else if (method === 'tools/list') {
         send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });

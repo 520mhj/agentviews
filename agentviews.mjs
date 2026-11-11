@@ -2,18 +2,18 @@
 /**
  * agentviews — Agent 的网页驱动层（CLI）
  * （v12 起产品名 agentviews；目录 / bridge-ext / 扩展 ID / window.__av 全部保持不动，
- *   避免用户重新加载已装好的扩展。命令行兼容名 agentview 亦保留。）
+ *   避免用户重新加载已装好的扩展。命令行兼容名 agentviews 亦保留。）
  *
  * 一句话：把网页变成一份"可执行的语义视图"，Agent 用它代替截图+坐标。
  *
  * 用法：
- *   node agentview.mjs open https://movie.douban.com/explore
- *   node agentview.mjs view
- *   node agentview.mjs act --name "豆瓣高分"
- *   node agentview.mjs act --name "欧美"
- *   node agentview.mjs verify
- *   node agentview.mjs audit          # 召回率自检
- *   node agentview.mjs close
+ *   node agentviews.mjs open https://movie.douban.com/explore
+ *   node agentviews.mjs view
+ *   node agentviews.mjs act --name "豆瓣高分"
+ *   node agentviews.mjs act --name "欧美"
+ *   node agentviews.mjs verify
+ *   node agentviews.mjs audit          # 召回率自检
+ *   node agentviews.mjs close
  *
  * 加 --json 输出机器可读。加 --headful 开有头窗口。
  *
@@ -53,7 +53,7 @@ let EXT_MODE = false;
 let BRIDGE = null;
 const isExt = () => EXT_MODE;
 const browserLabel = () => isExt()
-  ? 'desktop-main-chrome (via AgentView CDP Bridge)'
+  ? 'desktop-main-chrome (via AgentViews CDP Bridge)'
   : (ATTACH_PORT !== null ? 'attached-chrome' : 'standalone');
 // 扩展模式与 standalone 的 curPort 都是 9333，state key 必须分开，
 // 否则 standalone 的 owned 清单会被误当成扩展模式的（关错用户标签页）。
@@ -101,7 +101,7 @@ function parse(argv) {
   const f = {}, p = [];
   // 只有这些开关带值；其余（--json / --headful / --prune ...）是布尔，
   // 后面那个 token 是命令名，不能被吞掉（踩过 `--attach pages` 被解析成 help）。
-  const VALUE_FLAGS = new Set(['name', 'id', 'text', 'proxy', 'timeout', 'shot', 'port', 'state', 'idle', 'beat', 'attach', 'max', 'rounds']);
+  const VALUE_FLAGS = new Set(['name', 'id', 'text', 'proxy', 'timeout', 'shot', 'port', 'state', 'idle', 'beat', 'attach', 'max', 'rounds', 'tab', 'profile']);
   // 从 0 全扫：全局开关（--attach）可以出现在命令名之前，不能假定 argv[0] 就是 cmd。
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -308,6 +308,77 @@ const HOST_STATE = process.env.AV_HOST_STATE ||
   join(process.env.LOCALAPPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Local'),
        'agentviews-host', 'browser.json');
 
+// ── v13: 标签页选择 / 默认拉起桌面主 Chrome / 点击后能力地图 ──────────
+// 多标签页的本质：多个 owned tab 同时存在，curr 指向"当前正在操作哪个"，
+// 每条命令都按 curr 连接。--tab 一步切换 + 执行；tab use/new/list/close 显式管理。
+async function resolveTabId(spec) {
+  if (!spec) return null;
+  const pages = await listPages();
+  const s = String(spec);
+  if (/^#?\d+$/.test(s)) {
+    const n = Number(s.replace('#', ''));
+    const p = pages[n - 1] || pages[0];
+    return p ? p.id : null;
+  }
+  const hit = pages.find(p => p.id === s) || pages.find(p => p.id.startsWith(s));
+  return hit ? hit.id : null;
+}
+
+async function applyTabSelection() {
+  if (!flags.tab) return false;
+  const id = await resolveTabId(flags.tab);
+  if (!id) throw new Error('找不到标签页: ' + flags.tab + '（用 tab list 看序号）');
+  await markBaseline().catch(() => {});
+  const t = tabs();
+  if (isAttach() && t.baseline.includes(id))
+    throw new Error('拒绝切换：这是用户的标签页；agentviews 只在自己开的 tab 里活动。用 tab new 开一个');
+  if (!t.owned.includes(id) && !t.baseline.includes(id)) ownTab(id);
+  t.curr = id; saveTabs(); CURR = id;
+  dbg('tab ->', id);
+  return true;
+}
+
+async function createTab(url) {
+  await markBaseline();                 // 先把用户原有页封成 baseline
+  const t = tabs();
+  const q = url ? encodeURIComponent(url) : 'about:blank';
+  const tab = await httpJson('/json/new?' + q, 'PUT');
+  if (!tab || !tab.id) throw new Error('新建标签页失败');
+  if (!t.owned.includes(tab.id)) t.owned.push(tab.id);
+  t.curr = tab.id; saveTabs(); CURR = tab.id;
+  return tab;
+}
+
+// 点击 / 跳转 / 新标签页之后重跑一次 MAP_SRC：页面结构变了，
+// 由调用方（人或 Agent）决定要不要这份新地图，不强制每次都发。
+async function capabilityMap(cdp, full = false) {
+  const m = await evalJs(cdp, MAP_SRC, false);
+  m.product = 'agentviews';
+  m.context = 'after-act';
+  if (full) m.all_nodes = JSON.parse(await evalJs(cdp, 'JSON.stringify(__av.nodes)', false));
+  else for (const cc of m.capabilities) { cc.total = cc.nodes.length; cc.nodes = cc.nodes.slice(0, 14); }
+  return m;
+}
+
+// 没开浏览器时用桌面主 Chrome 的 Default profile 正常拉起（不带调试端口）。
+// Chrome 136+ 禁止在默认 user data dir 上开 --remote-debugging-port，
+// 所以这里走"启动 + 自有扩展桥 chrome.debugger"，不依赖任何端口。
+function bootDesktop(profileName) {
+  const bin = CANDIDATES.find(p => existsSync(p));
+  const exe = process.env.AV_CHROME || bin;
+  if (!exe) throw new Error('找不到 Chrome/Edge，请设置 AV_CHROME');
+  const name = profileName || process.env.AV_PROFILE_NAME || 'Default';
+  const args = [
+    "--user-data-dir=" + DEFAULT_UD,
+    "--profile-directory=" + name,
+    '--no-first-run', '--no-default-browser-check',
+    'about:blank'
+  ];
+  const ch = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  ch.unref();
+  return { exe, profile_dir: DEFAULT_UD, profile_name: name };
+}
+
 // ── v9: 浏览器盘点 / 自动选择 ──────────────────────────────────────────
 // 回答三个问题：现在开了哪些浏览器？哪个是桌面主浏览器？哪些能复用？
 // 结论由实测得出，不猜：只认「进程命令行里的调试端口」+「DevToolsActivePort 文件」
@@ -454,7 +525,7 @@ async function discoverBrowsers() {
       extension: extBridge ? extBridge.extension : null,
       version: extBridge ? extBridge.version : null,
       attached: extBridge ? extBridge.attached : [],
-      role: 'agentview 自有 CDP 传输：chrome.debugger API 直接驱动桌面主 Chrome 的标签页，cookies/登录态/窗口天然复用'
+      role: 'agentviews 自有 CDP 传输：chrome.debugger API 直接驱动桌面主 Chrome 的标签页，cookies/登录态/窗口天然复用'
     },
     login_bridge: loginBridge,
     recommend,
@@ -473,12 +544,26 @@ async function autoAttach() {
   if (rep.recommend && rep.recommend.mode === 'ext') {
     await enableExt();
     dbg('auto attach -> ext bridge (desktop main Chrome)');
-  } else if (rep.recommend) {
+    return;
+  }
+  // v13：一个 Chrome 根进程都没有 → 用 Default profile 把桌面主浏览器拉起来，
+  // 等自有扩展桥上线后直连（复用登录态/代理/多用户里的常用那个）。
+  if (rep.chrome_root_processes === 0) {
+    const boot = bootDesktop(process.env.AV_PROFILE_NAME || 'Default');
+    dbg('booted desktop chrome', boot.profile_name);
+    for (let i = 0; i < 16; i++) {
+      await sleep(500);
+      if (await extPing(1200)) { await enableExt(); dbg('auto attach -> ext after boot'); return; }
+    }
+    dbg('ext bridge not up after boot; fallback standalone (independent profile)');
+    return;
+  }
+  if (rep.recommend) {
     ATTACH_PORT = rep.recommend.port;
     dbg('auto attach ->', ATTACH_PORT, rep.recommend.source);
-  } else {
-    dbg('auto attach: no reusable CDP browser, will spawn standalone');
+    return;
   }
+  dbg('auto attach: will spawn standalone');
 }
 
 function resolveAttach() {
@@ -508,8 +593,8 @@ function resolveAttach() {
 // 只碰 owned 里的，baseline 永远不碰。
 function stateFile() {
   return process.env.AV_STATE || (isExt()
-    ? join(HERE, 'agentview-tabs.json')                 // 自有桥：写自己目录
-    : join(dirname(HOST_STATE), 'agentview-tabs.json')); // attach/standalone：跟随宿主状态目录
+    ? join(HERE, 'agentviews-tabs.json')                 // 自有桥：写自己目录
+    : join(dirname(HOST_STATE), 'agentviews-tabs.json')); // attach/standalone：跟随宿主状态目录
 }
 let TABS = null;
 
@@ -605,7 +690,7 @@ async function ensureBrowser() {
     let ok = false;
     for (let i = 0; i < 3 && !ok; i++) ok = !!(await extPing(2500));
     if (!ok) {
-      throw new Error(`自有扩展桥未就绪：请在 chrome://extensions 加载 agentview/bridge-ext（开发者模式 → 加载已解压的扩展程序），或确认 AV_BRIDGE_PORT=${BRIDGE_PORT} 与扩展 popup 里一致`);
+      throw new Error(`自有扩展桥未就绪：请在 chrome://extensions 加载 agentviews/bridge-ext（开发者模式 → 加载已解压的扩展程序），或确认 AV_BRIDGE_PORT=${BRIDGE_PORT} 与扩展 popup 里一致`);
     }
     return 'ext';
   }
@@ -620,7 +705,7 @@ async function ensureBrowser() {
   const bin = CANDIDATES.find(p => existsSync(p));
   if (!bin) throw new Error('找不到 Chrome/Edge，请设置 AV_CHROME 指向可执行文件');
   const exe = process.env.AV_CHROME || bin;
-  const profile = process.env.AV_PROFILE || join(tmpdir(), 'agentview-profile');
+  const profile = process.env.AV_PROFILE || join(tmpdir(), 'agentviews-profile');
   const args = [
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`,
@@ -671,6 +756,12 @@ async function pageTarget() {
     if (mine) { t.curr = mine.id; saveTabs(); return mine; }
     return newOwnedTab();
   }
+  // v13：curr 落盘后，单命令模式切换 tab 也能保持（tabs().curr 优先）。
+  const tc = tabs().curr;
+  if (tc) {
+    const cur = pages.find(t => t.id === tc);
+    if (cur) return cur;
+  }
   if (CURR) {
     const cur = pages.find(t => t.id === CURR);
     if (cur) return cur;
@@ -715,7 +806,8 @@ async function connect() {
   dbg('browser up');
   const page = await pageTarget();
   CURR = page.id;
-  if (isAttach()) { const t = tabs(); t.curr = page.id; saveTabs(); }
+  // v13：curr 落盘，单命令模式（每条命令一个新进程）也能记住"当前在哪个 tab"。
+  { const t = tabs(); t.curr = page.id; saveTabs(); }
   dbg('target', page.url);
   // v10：扩展模式下没有 WebSocket，全部 CDP 命令经 loopback 桥转给
   // 扩展的 chrome.debugger.sendCommand。ExtTransport.send() 与 CDP.send() 同构。
@@ -739,6 +831,7 @@ async function connect() {
         "document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('video,audio').forEach(v=>{v.muted=true;v.volume=0})},true);" +
         '}catch(e){}})()'
     });
+    cdp.__tabId = page.id;
     dbg('ext cdp ready');
     return { cdp, page };
   }
@@ -778,6 +871,7 @@ async function connect() {
       platform: 'Win32'
     });
   }
+  cdp.__tabId = page.id;
   dbg('cdp ready');
   return { cdp, page };
 }
@@ -1090,8 +1184,10 @@ async function main(cdpIn) {
   else if (flags.auto || process.env.AV_AUTO === '1') await autoAttach();
   // 每条命令都重读一次：宿主重启会换随机端口，daemon 不重读就会挂在旧端口上。
   resolveAttach();
+  // v13：--tab 可以在任意命令前切到指定标签页（幂等，serve 里也会先跑一次）。
+  await applyTabSelection();
   if (!cmd || cmd === 'help' || flags.help) {
-    emit(`agentviews — Agent 的网页驱动层（v12）
+    emit(`agentviews — Agent 的网页驱动层（v13）
 
   一级页面能力地图（先知道有什么，再决定做什么）
   map [--full] [--json] 能力地图：搜索框/菜单/内容入口/账户，按用途分组并标注作用
@@ -1103,10 +1199,19 @@ async function main(cdpIn) {
   open <url>            打开页面并注入视图（复用当前 tab 导航，不新开窗口）
   view [--json]         打印压缩语义视图
   find <substr>         按名字搜索节点
-  act --name <名字>     按名字点击（也可 --id n28）
+  act --name <名字>     按名字点击（也可 --id n28）；加 --map 附带点击后的新页能力地图
   act --name <名字> --text <值>   填输入框
   verify                读页面状态（选中项 / 列表）
   audit                 召回率自检（需要真值选择器）
+  多标签页（多个任务各自一个 tab，互不干扰）
+  tab new [url]         新建自己的标签页并切过去（可选直接打开 url）
+  tab use <id|#序号>    切到指定标签页（只许切到 agentviews 自己开的）
+  tab list              列出所有标签页，标 index / mine / user / curr
+  tab close [id|#序号]  关掉指定的自己开的标签页（拒绝关用户的）
+  --tab <id|#序号>      任意命令前加它 = 先切过去再执行
+  boot [--profile 名]   用桌面主 Chrome 的 profile 拉起浏览器（默认 Default）
+
+  浏览器 / 会话
   serve                 常驻模式（standalone 专用；attach 走单命令，用完即退）
   pages                 列出/清理标签页（attach 下只清自己开的）
   shot [path]           截图（给人看：扫码、验证码）
@@ -1122,10 +1227,13 @@ async function main(cdpIn) {
 
   --ext / AV_EXT=1       自有 CDP 传输：经 bridge-ext 直连桌面主浏览器（推荐）
   --attach <port>        attach 到任意已开调试端口的 Chrome（复用登录态）
-  --auto / AV_AUTO=1     自动挑：自有扩展桥 > 可达 CDP 端口 > 新建独立窗口
+  --auto / AV_AUTO=1     自动挑：自有扩展桥 > 拉起桌面主 Chrome(Default) > 可达 CDP 端口 > 独立窗口
   AV_ATTACH_PORT=<port> 直接指定 attach 端口，跳过宿主状态文件
   AV_BRIDGE_PORT=<port> 扩展桥端口（默认 9335，需与扩展 popup 一致）
-  --json / --headful / AV_DEBUG=1 / AV_PROXY=... / AV_IDLE_MS=...`);
+  AV_PROFILE_NAME=<名>   boot/--auto 拉起桌面主 Chrome 时用哪个 profile（默认 Default）
+  AV_PROFILE=<dir>       standalone 独立窗口的 user-data-dir
+  --json / --headful / AV_DEBUG=1 / AV_PROXY=... / AV_IDLE_MS=...
+  命令行简写：npm link 之后 avs == agentviews`);
     return;
   }
 
@@ -1157,7 +1265,7 @@ async function main(cdpIn) {
     }
     const eb = r.ext_bridge;
     emit('# 自有扩展桥: 127.0.0.1:' + eb.port + ' installed=' + eb.installed +
-         (eb.installed ? ' ext=' + eb.extension + ' v' + eb.version + ' attached=' + eb.attached.length : ' → 在 chrome://extensions 加载 agentview/bridge-ext'));
+         (eb.installed ? ' ext=' + eb.extension + ' v' + eb.version + ' attached=' + eb.attached.length : ' → 在 chrome://extensions 加载 agentviews/bridge-ext'));
     emit('#   ' + eb.role);
     const lb = r.login_bridge;
     emit('# 登录桥: 127.0.0.1:' + lb.port + ' listening=' + lb.listening +
@@ -1168,6 +1276,61 @@ async function main(cdpIn) {
       ? (r.recommend.mode === 'ext' ? '自有扩展桥 (--ext, 直连桌面主浏览器, ' + r.recommend.pages + ' tabs)' : 'port ' + r.recommend.port + ' (' + r.recommend.source + ', ' + r.recommend.browser + ', ' + r.recommend.pages + ' tabs)')
       : '无 → --auto 会新建独立窗口'));
     for (const a of r.advice) emit('# 建议: ' + a);
+    return;
+  }
+
+  if (cmd === 'boot') {
+    const r = bootDesktop(flags.profile || process.env.AV_PROFILE_NAME || 'Default');
+    emit(JSON.stringify({ booted: true, ...r,
+      note: '桌面主 Chrome 已拉起：登录态/代理/扩展与日常窗口一致。等扩展桥上线后用 --ext 直连' }, null, 2));
+    return;
+  }
+
+  if (cmd === 'tab') {
+    const sub = positional[0] || 'list';
+    await markBaseline().catch(() => {});
+    const t = tabs();
+    if (sub === 'new') {
+      const tab = await createTab(positional[1]);
+      const pages = await listPages();
+      emit(JSON.stringify({ action: 'new', id: tab.id, index: pages.findIndex(p => p.id === tab.id) + 1,
+        url: tab.url || 'about:blank', curr: tab.id, owned: t.owned.length }, null, 2));
+      return;
+    }
+    if (sub === 'use') {
+      const spec = positional[1];
+      if (!spec) throw new Error('tab use 需要 id 或 #序号（tab list 可查）');
+      const id = await resolveTabId(spec);
+      if (!id) throw new Error('找不到标签页: ' + spec);
+      if (isAttach() && t.baseline.includes(id))
+        throw new Error('拒绝切换：这是用户的标签页；agentviews 只在自己开的 tab 里活动。用 tab new 开一个');
+      if (!t.owned.includes(id) && !t.baseline.includes(id)) ownTab(id);
+      t.curr = id; saveTabs(); CURR = id;
+      const p = (await listPages()).find(x => x.id === id);
+      emit(JSON.stringify({ action: 'use', id, url: p ? p.url : null, owned: t.owned.length }, null, 2));
+      return;
+    }
+    if (sub === 'close') {
+      const id = await resolveTabId(positional[1] || t.curr);
+      if (!id) throw new Error('找不到要关的标签页');
+      if (t.baseline.includes(id)) throw new Error('拒绝关闭：这是用户的标签页（baseline 永久保护）');
+      if (isAttach() && !t.owned.includes(id)) throw new Error('拒绝关闭：不是 agentviews 开的标签页');
+      await httpJson('/json/close/' + id).catch(() => {});
+      t.owned = t.owned.filter(x => x !== id);
+      if (t.curr === id) t.curr = null;
+      saveTabs();
+      await sleep(200);
+      const gone = !(await listPages()).some(p => p.id === id);
+      emit(JSON.stringify({ action: 'close', id, closed: gone, user_tabs_untouched: true }, null, 2));
+      return;
+    }
+    const pages = await listPages();
+    emit(JSON.stringify({
+      browser: browserLabel(), curr: t.curr, owned: t.owned.length, baseline: t.baseline.length,
+      tabs: pages.map((p, i) => ({ index: i + 1, id: p.id, url: (p.url || '').slice(0, 100),
+        title: (p.title || '').slice(0, 50), curr: p.id === t.curr,
+        mine: t.owned.includes(p.id), user: t.baseline.includes(p.id) }))
+    }, null, 2));
     return;
   }
 
@@ -1394,20 +1557,24 @@ async function main(cdpIn) {
       ACTIVE_CDP = (await connect()).cdp;
       await waitStable(ACTIVE_CDP);
       await ensureAv(ACTIVE_CDP);
-      if (flags.json) return emit(JSON.stringify({ act: res, settle: JSON.parse(settled), new_tab: fresh.url }, null, 2));
+      const am = flags.map ? await capabilityMap(ACTIVE_CDP) : null;
+      if (flags.json) return emit(JSON.stringify({ act: res, settle: JSON.parse(settled), new_tab: fresh.url, ...(am ? { after_map: am } : {}) }, null, 2));
       emit(`act → ${JSON.stringify(res)}  ${clicked ? '[' + clicked + ']' : ''}`);
       emit(`# 新标签页 → ${fresh.url}`);
       emit('# 已切到新标签页，下一条命令对它生效');
+      if (am) emit('# after-map → ' + JSON.stringify({ site: am.site, title: am.title, total_nodes: am.total_nodes, capabilities: am.capabilities.map(x => ({ use: x.use, count: x.count })) }));
       return;
     }
     // 跳转后要等新页面长稳，否则拿到的是骨架（GitHub 仓库页首屏只有 40 个节点、没有 README）。
     if (JSON.parse(settled).reason === 'navigated') await waitStable(cdp);
     await ensureAv(cdp);
     const stats = await evalJs(cdp, 'window.__av.stats', false);
-    if (flags.json) return emit(JSON.stringify({ act: res, settle: JSON.parse(settled), stats }, null, 2));
+    const am = flags.map ? await capabilityMap(cdp) : null;
+    if (flags.json) return emit(JSON.stringify({ act: res, settle: JSON.parse(settled), stats, ...(am ? { after_map: am } : {}) }, null, 2));
     emit(`act → ${JSON.stringify(res)}`);
     emit(`settle → ${settled}`);
     emit(`# ${human(stats)}`);
+    if (am) emit('# after-map → ' + JSON.stringify({ site: am.site, title: am.title, total_nodes: am.total_nodes, capabilities: am.capabilities.map(x => ({ use: x.use, count: x.count })) }));
     return;
   }
 
@@ -1417,7 +1584,7 @@ async function main(cdpIn) {
     r.browser = browserLabel();
     r.tab = isAttach() ? tabs().curr : CURR;
     if (flags.shot) {
-      const out = typeof flags.shot === 'string' ? flags.shot : 'agentview/login.png';
+      const out = typeof flags.shot === 'string' ? flags.shot : 'agentviews/login.png';
       try {
         const s = await cdp.send('Page.captureScreenshot', { format: 'png' });
         writeFileSync(out, Buffer.from(s.data, 'base64'));
@@ -1516,7 +1683,7 @@ async function serve() {
     touch();
     if (req.method !== 'POST') {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: true, msg: 'agentview daemon' }));
+      return res.end(JSON.stringify({ ok: true, msg: 'agentviews daemon' }));
     }
     let body = '';
     for await (const c of req) body += c;
@@ -1524,7 +1691,24 @@ async function serve() {
     try {
       const { argv } = JSON.parse(body || '{}');
       ({ cmd, flags, positional } = parse(argv || []));
+      // v13：--tab / tab use|new 会改 curr；缓存的 ACTIVE_CDP 绑在旧 target 上，
+      // 切了 tab 就必须换连接，否则命令还对着旧页面执行。
+      await applyTabSelection().catch(() => {});
+      const want = (() => { try { return tabs().curr || CURR; } catch { return CURR; } })();
+      if (ACTIVE_CDP && ACTIVE_CDP.__tabId && want && ACTIVE_CDP.__tabId !== want) {
+        dbg('tab switch reconnect', ACTIVE_CDP.__tabId, '->', want);
+        try { GWS && GWS.close(); } catch { /* ignore */ }
+        ACTIVE_CDP = (await connect()).cdp;
+      }
       await main(ACTIVE_CDP);
+      // 命令本身也可能改 curr（tab use/new、act 新标签页）：校准缓存连接。
+      try {
+        const now = tabs().curr || CURR;
+        if (ACTIVE_CDP && ACTIVE_CDP.__tabId && now && ACTIVE_CDP.__tabId !== now) {
+          try { GWS && GWS.close(); } catch { /* ignore */ }
+          ACTIVE_CDP = (await connect()).cdp;
+        }
+      } catch { /* ignore */ }
       reply = { ok: true, out: OUT };
     } catch (e) {
       reply = { ok: false, error: e.message };

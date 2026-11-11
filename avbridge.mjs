@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 
-// AgentView v10 — 进程内 loopback 桥（零依赖，只用 Node 内置 http）。
+// AgentViews v10 — 进程内 loopback 桥（零依赖，只用 Node 内置 http）。
 // 扩展（MV3 SW）作 HTTP 长轮询客户端：
 //   GET  /pull  → 取一个 job（没有则挂起最多 20s，保持 SW 活跃）
 //   POST /push  → 回传 job 结果

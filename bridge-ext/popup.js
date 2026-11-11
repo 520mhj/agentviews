@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 
 // 说明：这个 popup 只是「桥是否被 CLI 起起来 + 扩展是否在轮询」的随手一看。
 // 它连不上是常态 —— agentviews 只在执行命令时临时起桥，命令结束桥就关了。
-// 判断安装是否成功请用 CLI：`node agentview.mjs --ext probe`
+// 判断安装是否成功请用 CLI：`node agentviews.mjs --ext probe`
 async function refresh(port) {
   const el = $('state');
   try {
@@ -21,7 +21,7 @@ async function refresh(port) {
       el.textContent = `桥在 ${port}，但还没有扩展轮询。\n若 CLI 正在跑命令，等一两秒再点"保存并重试"。`;
     }
   } catch {
-    el.textContent = `桥未启动（${port}）。这是正常的：agentviews 只在执行命令时临时起桥。\n要验证安装请跑：node agentview.mjs --ext probe`;
+    el.textContent = `桥未启动（${port}）。这是正常的：agentviews 只在执行命令时临时起桥。\n要验证安装请跑：node agentviews.mjs --ext probe`;
   }
 }
 

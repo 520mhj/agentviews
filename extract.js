@@ -1,5 +1,5 @@
 /*!
- * AgentView extractor v4 — 给 Agent 看的第二个渲染后端（网页版）
+ * AgentViews extractor v4 — 给 Agent 看的第二个渲染后端（网页版）
  *
  * v4 结果：5 个异构站点（豆瓣/MDN/必应/中国政府网/B站）交互元素召回率全部 1.000，
  * 平均压缩 267×（页 HTML → 视图字符），平均视图 2,317 字符。
