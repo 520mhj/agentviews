@@ -41,7 +41,8 @@ const INSTRUCTIONS = [
   '起点：av_open(url) → av_map 看当前页能力 → av_act 按名字点/填 → av_verify 做断言。',
   '多标签：av_tab_new / av_tab_use / av_tab_list，多个页面各自独立；',
   '点击后想看新页能力，用 av_act 的 map 参数或再跑 av_map（嵌套点击后结构会变，是否重看由你结合任务判断）。',
-  '没开浏览器时 av_boot 会用桌面主 Chrome 的 Default profile 拉起（复用登录态）；',
+  '没开浏览器时 av_boot 动态探测 Chrome 安装位置与 User Data，用 Default profile 拉起桌面主浏览器；' +
+  '它拉起后进程即退、浏览器常驻不关闭，后续命令经扩展桥 chrome.debugger 直连；',
   '碰登录墙用 av_login_check + av_login_watch 转述给用户、等他登完再继续。',
   '收尾：任务性（用完即弃）用 av_done 只关自己开的标签页；辅助性（用户还要接着看）用 av_keep 保留。',
   '拿不准就选 av_keep —— 多留一个标签页的代价远小于关掉用户正在读的东西。'
@@ -197,8 +198,10 @@ const TOOLS = [
   },
   {
     name: 'av_boot',
-    description: '没开浏览器时用它：拉起桌面主 Chrome（默认 Default profile，登录态/代理/扩展与日常窗口一致）。' +
-      '拉起后等扩展桥上线即可直连。多谷歌用户可用 profile 指定目录名（如 "Profile 5"）。',
+    description: '没开浏览器时用它：动态探测本机 Chrome/Edge 可执行文件与 User Data 目录，' +
+      '用桌面主浏览器的 Default profile 拉起（登录态/代理/扩展与日常窗口一致）。' +
+      '拉起后 av_boot 进程立即退出，浏览器常驻、不会被关闭；后续 av_* 命令由扩展桥起 9335 后走 chrome.debugger 直连。' +
+      '多谷歌用户可用 profile 指定目录名（如 "Profile 5"）；AV_CHROME / AV_USER_DATA_DIR 可覆盖探测结果。',
     inputSchema: { type: 'object', properties: { profile: { type: 'string', description: 'profile 目录名，默认 Default' } } },
   },
   {
@@ -293,7 +296,9 @@ async function callTool(name, a = {}) {
     case 'av_shot':
       return callCli([...T, 'shot', ...(a.path ? [a.path] : [])]);
     case 'av_boot':
-      return callCli([...T, 'boot', ...(a.profile ? ['--profile', a.profile] : [])]);
+      // boot 只拉起主浏览器然后退出：绝不能带 --auto（会重复拉起 + 起一个随进程消失的桥），
+      // 也不该转发给 daemon。它自己就是一个短命令。
+      return callCli(['boot', ...(a.profile ? ['--profile', a.profile] : [])]);
     case 'av_tab_new':
       return callCli([...T, 'tab', 'new', ...(a.url ? [a.url] : [])]);
     case 'av_tab_use':
@@ -327,7 +332,7 @@ process.stdin.on('data', async chunk => {
         send({ jsonrpc: '2.0', id, result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'agentviews', version: '1.0.0' },
+          serverInfo: { name: 'agentviews', version: '1.0.1' },
           instructions: INSTRUCTIONS,
         } });
       } else if (method === 'tools/list') {

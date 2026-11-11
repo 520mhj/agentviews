@@ -11,7 +11,7 @@
 
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-8b5cf6.svg)]()
+[![Version](https://img.shields.io/badge/version-1.0.1-8b5cf6.svg)]()
 [![Chrome](https://img.shields.io/badge/Chrome-MV3%20%2B%20chrome.debugger-4285F4?logo=googlechrome&logoColor=white)]()
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)]()
 [![Recall](https://img.shields.io/badge/recall-1.000%20%2F%205%20sites-success.svg)]()
@@ -666,8 +666,27 @@ MIT © [AvaTaring](https://github.com/520mhj)
 | MCP 自动降级 | `initialize` 回带 `instructions`：`web_search` / `web_fetch` 受阻就改用 `av_*`，不用人提醒 |
 | 多标签页并行 | `tab new / use / list / close` + 任意命令加 `--tab <id|#序号>`，多个页面各自独立 |
 | 点击后地图 | `act --map`（或 `av_act` 的 `map=true`）附带返回新页能力地图 `after_map`；嵌套点击后要不要重看，由 Agent 结合任务判断 |
-| 没开浏览器 | `av_boot` 或 MCP 默认 `auto`：用桌面主 Chrome 的 **Default** profile 拉起，登录态/代理/扩展与日常窗口一致 |
+| 没开浏览器 | `av_boot` 或 MCP 默认 `auto`：用桌面主 Chrome 的 **Default** profile 拉起，登录态/代理/扩展与日常窗口一致；v1.0.1 起安装路径与 User Data 动态探测、浏览器常驻不关闭 |
 | 多谷歌用户 | `AV_PROFILE_NAME=<目录名>` / `boot --profile <名>` 指定；默认 `Default`（实测可读取 `profile.info_cache` 里的账户信息） |
 
 收尾规则不变：任务性用 `done`（只关自己开的标签页）、辅助性用 `keep`（保留），
 拿不准选 `keep`。详见「给 Agent 的使用须知」。
+
+## 🆕 v1.0.1：av_boot 只负责拉起，浏览器常驻
+
+| 改进 | 说明 |
+|---|---|
+| 安装位置动态探测 | `chrome-detect.mjs`：按顺序查 `AV_CHROME` → 注册表 `App Paths`（HKLM/HKCU，chrome.exe / msedge.exe）→ `ProgramFiles` / `LOCALAPPDATA` 动态拼路径 → `PATH`。不写死盘符与安装目录 |
+| User Data 动态推导 | `AV_USER_DATA_DIR` 覆盖；否则按探测到的产品（Chrome / Edge）+ `LOCALAPPDATA` 拼 `<vendor>/User Data`。换盘符、换用户、装到 D 盘都能用 |
+| `probe` 可核对 | `probe --json` 的 `install` 字段列出 `exe` / `exe_source` / `user_data_dir` / `localappdata`，一眼确认探测到的是不是你自己装的那套浏览器 |
+| 主浏览器常驻 | `boot` **不带** `--remote-debugging-port`（Chrome 136+ 禁止在默认 UD 上开）。Windows 上经 `WMI Win32_Process.Create` 派生浏览器：进程由 WMI 服务创建，不落在调用方 Job Object 里，`av_boot` 退出、甚至 `job_kill` 取消后台任务都不会把它收走（此前 `spawn{detached}+unref` 会被连带杀掉，已修）。`done` / `close` 只关自己开的标签页，碰不到这个主窗口 |
+| `av_boot` 进程即退 | MCP 的 `av_boot` 不再带 `--auto` 前缀：不会重复拉起、不会起一个随进程消失的 9335 桥，也不转发给 daemon。命令打印结果后立刻退出 |
+| 扩展桥接管 | 下一条 `av_open` / `av_map` 等命令在自己的进程里起 9335 桥，扩展 MV3 SW 长轮询接上，经 `chrome.debugger` 直连主浏览器——登录态天然复用 |
+| `keep` 顺手 detach | 辅助性收尾现在会 `debugger.detachAll`，消掉「正在调试此浏览器」信息栏，同时保留标签页与视频播放；下一条 `--ext` 命令按需重新 attach |
+
+```bash
+avs boot --json                       # 拉起桌面主 Chrome 后本进程退出，浏览器常驻
+avs probe --json                      # 看 install 字段：exe / user_data_dir 是怎么探出来的
+avs --ext open https://www.bilibili.com/
+avs --ext keep                        # 保留窗口与标签页，detach 调试栏
+```

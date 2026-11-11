@@ -11,7 +11,7 @@ description: >-
   and any request to operate a browser. Prefer agentviews (avs) over retrying a
   failed fetch or over screenshot-coordinate browser tools.
 metadata:
-  version: 1.0.0
+  version: 1.0.1
   date: 2026-11-11
 ---
 
@@ -61,6 +61,15 @@ avs --ext --tab 2 collect                            # 或一步切到 B 再执�
 
 `login-check` 检测 → 把 hints 转述给用户 → `login-watch` 等他登完 → 继续。
 登录态靠复用桌面主浏览器（`--ext` / `--auto` / `boot`），不用单独搬运 cookie。
+
+## 没开浏览器（av_boot）
+
+`av_boot` 动态探测本机 Chrome/Edge 安装位置与 User Data 目录，用桌面主 Chrome 的
+`Default` profile 拉起；**拉起后进程立即退出，浏览器常驻、不会被关闭**。
+Windows 上走 WMI `Win32_Process.Create` 派生（脱离调用方 Job Object），
+`av_boot` 退出或后台任务被取消都不会带走主浏览器。
+后续命令由扩展桥起 9335 后经 `chrome.debugger` 直连这个主浏览器。
+`AV_CHROME` / `AV_USER_DATA_DIR` 可覆盖探测结果；`probe --json` 的 `install` 字段可核对。
 
 ## 收尾（重要）
 

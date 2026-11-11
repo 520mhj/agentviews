@@ -1,6 +1,6 @@
 {
   "name": "agentviews",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Agent 的网页驱动层：把网页变成可执行的语义视图（agentviews 地图 / 搜索 / 结构化采集），代替截图+坐标，复用桌面主浏览器登录态",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   },
   "files": [
     "agentviews.mjs",
+    "chrome-detect.mjs",
     "extract.js",
     "avbridge.mjs",
     "mcp.mjs",

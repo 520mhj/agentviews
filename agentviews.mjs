@@ -30,14 +30,24 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AvBridge } from './avbridge.mjs';
+import { describeInstall } from './chrome-detect.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXTRACT = join(HERE, 'extract.js');
 const PORT = Number(process.env.AV_PORT || 9333);
 const DAEMON = Number(process.env.AV_DAEMON || 9334);
 const LOCALAPP = process.env.LOCALAPPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Local');
-// 桌面日常 Chrome 的 profile。Chrome 136+ 禁止在这个默认目录上开远程调试。
-const DEFAULT_UD = join(LOCALAPP, 'Google', 'Chrome', 'User Data');
+// v1.0.1：浏览器可执行文件与 User Data 目录全部动态探测，不写死任何盘符。
+// 顺序：AV_CHROME / AV_USER_DATA_DIR → 注册表 App Paths → 环境变量拼路径 → PATH。
+// 桌面日常 Chrome 的 profile；Chrome 136+ 禁止在这个默认目录上开远程调试。
+let _install = null;
+function install() { return _install || (_install = describeInstall()); }
+function defaultUserDataDir() { return install().user_data_dir; }
+function browserExe() {
+  const e = install().exe;
+  if (!e) throw new Error('找不到 Chrome/Edge：注册表 App Paths / 环境变量 / PATH 都没命中，可设 AV_CHROME 指向可执行文件');
+  return e;
+}
 
 // 宿主浏览器用 --remote-debugging-port=0 时端口是随机的，必须动态读状态文件。
 // ATTACH_PORT 非空时所有 /json/* 请求都走它，不再连自己 spawn 的 9333。
@@ -363,20 +373,68 @@ async function capabilityMap(cdp, full = false) {
 // 没开浏览器时用桌面主 Chrome 的 Default profile 正常拉起（不带调试端口）。
 // Chrome 136+ 禁止在默认 user data dir 上开 --remote-debugging-port，
 // 所以这里走"启动 + 自有扩展桥 chrome.debugger"，不依赖任何端口。
+// v1.0.1：exe / User Data 都来自动态探测；spawn 用 detached + unref，
+// 浏览器是独立主窗口，绝不会随 av_boot 这个短命令进程一起退出。
 function bootDesktop(profileName) {
-  const bin = CANDIDATES.find(p => existsSync(p));
-  const exe = process.env.AV_CHROME || bin;
-  if (!exe) throw new Error('找不到 Chrome/Edge，请设置 AV_CHROME');
+  const d = install();
+  if (!d.exe) throw new Error('找不到 Chrome/Edge：注册表 App Paths / 环境变量 / PATH 都没命中，可设 AV_CHROME 指向可执行文件');
+  const exe = d.exe;
   const name = profileName || process.env.AV_PROFILE_NAME || 'Default';
   const args = [
-    "--user-data-dir=" + DEFAULT_UD,
-    "--profile-directory=" + name,
+    '--user-data-dir="' + d.user_data_dir + '"',
+    '--profile-directory=' + name,
     '--no-first-run', '--no-default-browser-check',
     'about:blank'
   ];
-  const ch = spawn(exe, args, { detached: true, stdio: 'ignore' });
-  ch.unref();
-  return { exe, profile_dir: DEFAULT_UD, profile_name: name };
+  const cmdline = '"' + exe + '" ' + args.join(' ');
+
+  // 关键：Windows 上 Node 的 spawn({detached:true}) + unref() 只让父进程不再 wait，
+  // 新进程仍落在当前命令的 Job Object / 进程树里。host 取消后台任务（job_kill /
+  // TerminateJobObject）会把整棵树收走 —— 用户看到的现象就是「av_boot 一结束、
+  // 或相关后台任务被取消，刚拉起的主浏览器也跟着关了」。
+  // 改用 WMI Win32_Process.Create：进程由 WMI 服务派生，不在我们的 Job Object 里，
+  // 与 av_boot 进程、与调用它的后台任务都不再有父子/作业关系 → 浏览器真正常驻。
+  let launcher = 'spawn-detached';
+  let browserPid = null;
+  if (process.platform === 'win32') {
+    const b64 = Buffer.from(cmdline, 'utf8').toString('base64');
+    const ps = [
+      "$ProgressPreference='SilentlyContinue';",
+      '$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("' + b64 + '"));',
+      '$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$c};',
+      '"RET="+$r.ReturnValue+" PID="+$r.ProcessId'
+    ].join(' ');
+    const enc = Buffer.from(ps, 'utf16le').toString('base64');
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', enc],
+      { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    const m = String(out).match(/RET=(\d+)\s+PID=(\d+)/);
+    if (!m || m[1] !== '0') throw new Error('WMI 启动桌面 Chrome 失败：' + String(out).trim());
+    launcher = 'wmi:Win32_Process.Create (脱离 Job Object，浏览器真正常驻)';
+    browserPid = Number(m[2]);
+  } else {
+    const ch = spawn(exe, [
+      '--user-data-dir=' + d.user_data_dir,
+      '--profile-directory=' + name,
+      '--no-first-run', '--no-default-browser-check', 'about:blank'
+    ], { detached: true, stdio: 'ignore' });
+    ch.unref();
+    browserPid = ch.pid;
+  }
+
+  return {
+    exe,
+    exe_source: d.exe_source,
+    user_data_dir: d.user_data_dir,
+    profile_dir: d.user_data_dir,
+    profile_name: name,
+    localappdata: d.localappdata,
+    cmdline,
+    launcher,
+    browser_pid: browserPid,
+    detached: true,
+    persistent: true,
+    remote_debugging_port: false,
+  };
 }
 
 // ── v9: 浏览器盘点 / 自动选择 ──────────────────────────────────────────
@@ -473,14 +531,14 @@ async function discoverBrowsers() {
   // 3) 每个 Chrome 根进程
   const browsers = [];
   for (const r of roots) {
-    const isDefault = !r.ud || normPath(r.ud) === normPath(DEFAULT_UD);
+    const isDefault = !r.ud || normPath(r.ud) === normPath(defaultUserDataDir());
     // 非默认 profile 的 Chrome 一律算「隔离 profile」：可能是另一个自动化宿主
     // 拉起的受管实例，也可能是用户自己开的第二个 profile。两者对我们的用法一样。
     const item = {
       pid: r.pid,
       kind: isDefault ? 'desktop-main' : 'isolated-profile',
       title: r.title,
-      profile: r.ud || '(default: ' + DEFAULT_UD + ')',
+      profile: r.ud || '(default: ' + defaultUserDataDir() + ')',
       debug_flag: r.debugPort === null ? 'none' : (r.debugPort === 0 ? 'random → DevToolsActivePort' : String(r.debugPort)),
       cdp_port: (r.debugPort === 0 || r.debugPort === null) ? dtaPort(r.ud) : r.debugPort,
       attachable: false,
@@ -515,7 +573,8 @@ async function discoverBrowsers() {
     : (cdpRecommend ? { mode: 'cdp', port: cdpRecommend.port, source: cdpRecommend.source, kind: cdpRecommend.kind, browser: cdpRecommend.browser, pages: cdpRecommend.pages } : null);
   return {
     chrome_root_processes: roots.length,
-    default_profile: DEFAULT_UD,
+    install: install(),
+    default_profile: defaultUserDataDir(),
     desktop_main: browsers.find(b => b.kind === 'desktop-main') || null,
     browsers,
     candidates,
@@ -677,13 +736,6 @@ async function closeOwned(keepCurr = false) {
   return kill.filter(id => !after.has(id)).length;
 }
 
-const CANDIDATES = [
-  'C:/Program Files/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
-  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-];
-
 async function ensureBrowser() {
   // v10 扩展模式：浏览器就是用户的桌面主 Chrome，绝不 spawn。
   if (isExt()) {
@@ -702,9 +754,7 @@ async function ensureBrowser() {
     return 'attach';
   }
   if (await browserUp()) return 'standalone-existing';
-  const bin = CANDIDATES.find(p => existsSync(p));
-  if (!bin) throw new Error('找不到 Chrome/Edge，请设置 AV_CHROME 指向可执行文件');
-  const exe = process.env.AV_CHROME || bin;
+  const exe = browserExe();
   const profile = process.env.AV_PROFILE || join(tmpdir(), 'agentviews-profile');
   const args = [
     `--remote-debugging-port=${PORT}`,
@@ -1132,11 +1182,19 @@ async function closeBrowser() {
 async function finish(mode) {
   if (mode === 'keep') {
     const t = isAttach() ? tabs() : null;
+    // v1.0.1：保留标签页的同时显式 detach，消掉「正在调试此浏览器」信息栏；
+    // 下一条 --ext 命令会按需重新 attach（attachTab 能处理 already attached）。
+    let detached = 0;
+    if (isExt()) {
+      try { const r = await BRIDGE.job('debugger.detachAll', {}, 4000); detached = r.detached || 0; }
+      catch (e) { dbg('detachAll on keep', e.message); }
+    }
     emit(JSON.stringify({
       mode: 'keep', kept: true,
       browser: browserLabel(),
       owned_tabs: t ? t.owned.length : null,
       curr: t ? t.curr : CURR,
+      debugger_detached: detached,
       note: t ? '只保留自己开的标签页；用户主窗口与其它标签页完全未动' : '独立窗口保留，可继续下令'
     }, null, 2));
     return;
@@ -1179,6 +1237,23 @@ async function shutdown(code = 0) {
 
 async function main(cdpIn) {
   OUT = [];
+  // v1.0.1：boot 只做一件事——把桌面主 Chrome 常驻拉起，然后让本进程立刻结束。
+  // 不 connect、不起扩展桥、不切 tab：桥是「下一条命令」的进程起的，
+  // 这样短命令退出时也带不走任何东西；浏览器 detached+unref 独立存活。
+  // 目的：扩展桥上线后经 chrome.debugger 直连这个主浏览器，复用登录态。
+  if (cmd === 'boot') {
+    const before = chromeRoots().length;
+    const r = bootDesktop(flags.profile || process.env.AV_PROFILE_NAME || 'Default');
+    emit(JSON.stringify({
+      booted: true,
+      chrome_root_processes_before: before,
+      ...r,
+      browser_persistent: true,
+      av_boot_process_exits: true,
+      next: '浏览器常驻；后续 av_open / av_map / ... 由扩展桥起 9335 后走 chrome.debugger 直连，不必再启动浏览器',
+    }, null, 2));
+    return;
+  }
   // v10：显式 --ext 直接启用自有扩展桥；--auto 由 discoverBrowsers 优先选扩展桥。
   if (flags.ext || process.env.AV_EXT === '1') await enableExt();
   else if (flags.auto || process.env.AV_AUTO === '1') await autoAttach();
@@ -1187,7 +1262,7 @@ async function main(cdpIn) {
   // v13：--tab 可以在任意命令前切到指定标签页（幂等，serve 里也会先跑一次）。
   await applyTabSelection();
   if (!cmd || cmd === 'help' || flags.help) {
-    emit(`agentviews — Agent 的网页驱动层（v13）
+    emit(`agentviews — Agent 的网页驱动层（v1.0.1）
 
   一级页面能力地图（先知道有什么，再决定做什么）
   map [--full] [--json] 能力地图：搜索框/菜单/内容入口/账户，按用途分组并标注作用
@@ -1209,7 +1284,7 @@ async function main(cdpIn) {
   tab list              列出所有标签页，标 index / mine / user / curr
   tab close [id|#序号]  关掉指定的自己开的标签页（拒绝关用户的）
   --tab <id|#序号>      任意命令前加它 = 先切过去再执行
-  boot [--profile 名]   用桌面主 Chrome 的 profile 拉起浏览器（默认 Default）
+  boot [--profile 名]   动态探测 Chrome 安装位置/User Data，拉起桌面主 Chrome 后本进程即退（浏览器常驻）
 
   浏览器 / 会话
   serve                 常驻模式（standalone 专用；attach 走单命令，用完即退）
@@ -1232,6 +1307,8 @@ async function main(cdpIn) {
   AV_BRIDGE_PORT=<port> 扩展桥端口（默认 9335，需与扩展 popup 一致）
   AV_PROFILE_NAME=<名>   boot/--auto 拉起桌面主 Chrome 时用哪个 profile（默认 Default）
   AV_PROFILE=<dir>       standalone 独立窗口的 user-data-dir
+  AV_CHROME=<exe>        手动指定浏览器可执行文件（默认动态探测：注册表 App Paths → 环境变量 → PATH）
+  AV_USER_DATA_DIR=<dir> 手动指定桌面主浏览器 User Data（默认按 LOCALAPPDATA + 产品名推导）
   --json / --headful / AV_DEBUG=1 / AV_PROXY=... / AV_IDLE_MS=...
   命令行简写：npm link 之后 avs == agentviews`);
     return;
@@ -1254,6 +1331,8 @@ async function main(cdpIn) {
     if (flags.json) return emit(JSON.stringify(r, null, 2));
     const main = r.desktop_main;
     emit('# 浏览器盘点  chrome 根进程 ' + r.chrome_root_processes + ' 个');
+    emit('# 动态探测: exe=' + r.install.exe + '  ← ' + r.install.exe_source);
+    emit('#            user_data_dir=' + r.install.user_data_dir + '  (LOCALAPPDATA=' + r.install.localappdata + ')');
     for (const b of r.browsers) {
       emit('#  pid=' + b.pid + '  ' + b.kind + '  cdp=' + (b.cdp_port || 'none') +
            '  attachable=' + b.attachable + '  ' + (b.title || '').slice(0, 46));
@@ -1276,13 +1355,6 @@ async function main(cdpIn) {
       ? (r.recommend.mode === 'ext' ? '自有扩展桥 (--ext, 直连桌面主浏览器, ' + r.recommend.pages + ' tabs)' : 'port ' + r.recommend.port + ' (' + r.recommend.source + ', ' + r.recommend.browser + ', ' + r.recommend.pages + ' tabs)')
       : '无 → --auto 会新建独立窗口'));
     for (const a of r.advice) emit('# 建议: ' + a);
-    return;
-  }
-
-  if (cmd === 'boot') {
-    const r = bootDesktop(flags.profile || process.env.AV_PROFILE_NAME || 'Default');
-    emit(JSON.stringify({ booted: true, ...r,
-      note: '桌面主 Chrome 已拉起：登录态/代理/扩展与日常窗口一致。等扩展桥上线后用 --ext 直连' }, null, 2));
     return;
   }
 
@@ -1741,7 +1813,9 @@ if (cmd === 'serve') {
     // 有常驻进程就转发过去；没有就自己干（单命令模式，浏览器随进程结束）。
     // attach 模式一律本地执行：绝不把 --attach 命令转发给可能存在的 standalone
     // daemon（那个 daemon 连的是 9333 的另一套浏览器，会开错 tab / 关错窗口）。
-    const attachMode = !!(flags.attach || flags.auto || flags.ext || process.env.AV_AUTO === '1' || process.env.AV_EXT === '1' || process.env.AV_ATTACH_PORT);
+    // v1.0.1：boot 一律本地执行——转发给 standalone daemon 会让浏览器变成
+    // daemon 的子进程，且 daemon 可能正连着另一套独立 profile。
+    const attachMode = !!(cmd === 'boot' || flags.attach || flags.auto || flags.ext || process.env.AV_AUTO === '1' || process.env.AV_EXT === '1' || process.env.AV_ATTACH_PORT);
     let forwarded = false;
     try {
       if (attachMode) throw new Error('attach: local only');
