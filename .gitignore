@@ -1,0 +1,7 @@
+node_modules/
+bridge-auth.json
+.agentviews-runtime.json
+.agentviews-managed.json
+mcp-config.json
+skills/agentviews/scripts/tool-path.json
+/agentviews-tabs.json

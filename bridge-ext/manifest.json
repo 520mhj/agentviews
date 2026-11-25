@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "AgentViews CDP Bridge",
+  "version": "2.0.0",
+  "description": "Authenticated loopback CDP transport for the locally installed AgentViews runtime.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AgentViews CDP Bridge"
+  },
+  "minimum_chrome_version": "125"
+}
